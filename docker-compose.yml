@@ -1,0 +1,535 @@
+version: '3.9'
+
+# Common configuration for services
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - syncflow_network
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Resource limits for production services
+x-resources-production: &resources-production
+  deploy:
+    resources:
+      limits:
+        cpus: '1.0'
+        memory: 1G
+      reservations:
+        cpus: '0.25'
+        memory: 256M
+
+# Resource limits for monitoring services
+x-resources-monitoring: &resources-monitoring
+  deploy:
+    resources:
+      limits:
+        cpus: '0.5'
+        memory: 512M
+      reservations:
+        cpus: '0.1'
+        memory: 128M
+
+services:
+  #==============================================================
+  # DATABASE SERVICES
+  #==============================================================
+  postgres:
+    <<: [*service-defaults, *resources-production]
+    image: postgres:17-alpine
+    container_name: syncflow_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+      - ./init/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  postgres_sentry:
+    <<: [*service-defaults, *resources-production]
+    image: postgres:17-alpine
+    container_name: syncflow_sentry_postgres
+    environment:
+      POSTGRES_USER: ${SENTRY_DB_USER}
+      POSTGRES_PASSWORD: ${SENTRY_DB_PASSWORD}
+      POSTGRES_DB: ${SENTRY_DB_NAME}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_sentry_data:/var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SENTRY_DB_USER} -d ${SENTRY_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    <<: [*service-defaults, *resources-production]
+    image: redis:7-alpine
+    container_name: syncflow_redis
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  #==============================================================
+  # MONITORING STACK
+  #==============================================================
+  prometheus:
+    <<: [*service-defaults, *resources-monitoring]
+    image: prom/prometheus:latest
+    container_name: syncflow_prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    user: "nobody:nogroup"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  loki:
+    <<: [*service-defaults, *resources-monitoring]
+    image: grafana/loki:latest
+    container_name: syncflow_loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  grafana:
+    <<: [*service-defaults, *resources-monitoring]
+    image: grafana/grafana-oss:latest
+    container_name: syncflow_grafana
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    user: "472"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  #==============================================================
+  # MESSAGING SERVICES
+  #==============================================================
+  rabbitmq:
+    <<: [*service-defaults, *resources-production]
+    image: rabbitmq:3-management-alpine
+    container_name: syncflow_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672"  # AMQP protocol
+      - "127.0.0.1:15672:15672"  # Management UI
+      - "127.0.0.1:15692:15692"  # Prometheus metrics
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  # Zookeeper (required for Kafka)
+  zookeeper:
+    <<: [*service-defaults, *resources-production]
+    image: confluentinc/cp-zookeeper:latest
+    container_name: syncflow_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    ports:
+      - "127.0.0.1:2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  # Kafka
+  kafka:
+    <<: [*service-defaults, *resources-production]
+    image: confluentinc/cp-kafka:latest
+    container_name: syncflow_kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # Kafka UI
+  kafka_ui:
+    <<: [*service-defaults, *resources-monitoring]
+    image: provectuslabs/kafka-ui:latest
+    container_name: syncflow_kafka_ui
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: syncflow
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "127.0.0.1:8080:8080"
+    security_opt:
+      - no-new-privileges:true
+
+  #==============================================================
+  # ERROR TRACKING
+  #==============================================================
+  sentry:
+    <<: [*service-defaults, *resources-production]
+    image: getsentry/sentry:latest
+    container_name: syncflow_sentry
+    depends_on:
+      - redis
+      - postgres_sentry
+      - sentry_setup
+      - kafka
+    environment:
+      SENTRY_POSTGRES_HOST: postgres_sentry
+      SENTRY_POSTGRES_PORT: 5432
+      SENTRY_DB_USER: ${SENTRY_DB_USER}
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_DB_NAME: ${SENTRY_DB_NAME}
+      SENTRY_REDIS_HOST: redis
+      SENTRY_REDIS_PORT: 6379
+      SENTRY_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_KAFKA_HOST: kafka
+      SENTRY_KAFKA_PORT: 9092
+      SENTRY_SECURE_COOKIES: 'true'
+      SENTRY_SINGLE_ORGANIZATION: 'false'
+    volumes:
+      - sentry_config:/etc/sentry
+      - sentry_data:/var/lib/sentry/files
+    ports:
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  sentry_setup:
+    image: getsentry/sentry:latest
+    container_name: syncflow_sentry_setup
+    depends_on:
+      - postgres_sentry
+      - redis
+    environment:
+      SENTRY_POSTGRES_HOST: postgres_sentry
+      SENTRY_POSTGRES_PORT: 5432
+      SENTRY_DB_USER: ${SENTRY_DB_USER}
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_DB_NAME: ${SENTRY_DB_NAME}
+      SENTRY_REDIS_HOST: redis
+      SENTRY_REDIS_PORT: 6379
+      SENTRY_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_ADMIN_EMAIL: ${SENTRY_ADMIN_EMAIL}
+      SENTRY_ADMIN_PASSWORD: ${SENTRY_ADMIN_PASSWORD}
+    volumes:
+      - sentry_config:/etc/sentry
+    command: >
+      bash -c "sentry upgrade --noinput && 
+               sentry createuser --email ${SENTRY_ADMIN_EMAIL} --password ${SENTRY_ADMIN_PASSWORD} --superuser --no-input"
+    restart: "no"
+    networks:
+      - syncflow_network
+
+  sentry_worker:
+    <<: [*service-defaults, *resources-monitoring]
+    image: getsentry/sentry:latest
+    container_name: syncflow_sentry_worker
+    depends_on:
+      - redis
+      - postgres_sentry
+      - sentry
+      - kafka
+    command: run worker
+    environment:
+      SENTRY_POSTGRES_HOST: postgres_sentry
+      SENTRY_POSTGRES_PORT: 5432
+      SENTRY_DB_USER: ${SENTRY_DB_USER}
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_DB_NAME: ${SENTRY_DB_NAME}
+      SENTRY_REDIS_HOST: redis
+      SENTRY_REDIS_PORT: 6379
+      SENTRY_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_KAFKA_HOST: kafka
+      SENTRY_KAFKA_PORT: 9092
+    volumes:
+      - sentry_config:/etc/sentry
+    security_opt:
+      - no-new-privileges:true
+
+  sentry_cron:
+    <<: [*service-defaults, *resources-monitoring]
+    image: getsentry/sentry:latest
+    container_name: syncflow_sentry_cron
+    depends_on:
+      - redis
+      - postgres_sentry
+      - sentry
+    command: run cron
+    environment:
+      SENTRY_POSTGRES_HOST: postgres_sentry
+      SENTRY_POSTGRES_PORT: 5432
+      SENTRY_DB_USER: ${SENTRY_DB_USER}
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_DB_NAME: ${SENTRY_DB_NAME}
+      SENTRY_REDIS_HOST: redis
+      SENTRY_REDIS_PORT: 6379
+      SENTRY_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+    volumes:
+      - sentry_config:/etc/sentry
+    security_opt:
+      - no-new-privileges:true
+
+  #==============================================================
+  # EXPORTERS FOR PROMETHEUS
+  #==============================================================
+  node_exporter:
+    <<: [*service-defaults, *resources-monitoring]
+    image: prom/node-exporter:latest
+    container_name: syncflow_node_exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+    user: "nobody:nogroup"
+    security_opt:
+      - no-new-privileges:true
+
+  postgres_exporter:
+    <<: [*service-defaults, *resources-monitoring]
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: syncflow_postgres_exporter
+    depends_on:
+      - postgres
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    ports:
+      - "127.0.0.1:9187:9187"
+    user: "nobody:nogroup"
+    security_opt:
+      - no-new-privileges:true
+
+  redis_exporter:
+    <<: [*service-defaults, *resources-monitoring]
+    image: oliver006/redis_exporter:latest
+    container_name: syncflow_redis_exporter
+    depends_on:
+      - redis
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:9121:9121"
+    user: "nobody:nogroup"
+    security_opt:
+      - no-new-privileges:true
+
+  kafka_exporter:
+    <<: [*service-defaults, *resources-monitoring]
+    image: danielqsj/kafka-exporter:latest
+    container_name: syncflow_kafka_exporter
+    command:
+      - --kafka.server=kafka:9092
+    ports:
+      - "127.0.0.1:9308:9308"
+    depends_on:
+      - kafka
+    user: "nobody:nogroup"
+    security_opt:
+      - no-new-privileges:true
+
+  rabbitmq_exporter:
+    <<: [*service-defaults, *resources-monitoring]
+    image: kbudde/rabbitmq-exporter:latest
+    container_name: syncflow_rabbitmq_exporter
+    environment:
+      RABBIT_URL: "http://rabbitmq:15672"
+      RABBIT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBIT_PASSWORD: ${RABBITMQ_DEFAULT_PASS}
+      PUBLISH_PORT: "9419"
+      OUTPUT_FORMAT: "prometheus"
+    ports:
+      - "127.0.0.1:9419:9419"
+    depends_on:
+      - rabbitmq
+    security_opt:
+      - no-new-privileges:true
+
+  #==============================================================
+  # AI BACKEND SERVICES
+  #==============================================================
+  # Vector Database for Embeddings
+  qdrant:
+    <<: [*service-defaults, *resources-production]
+    image: qdrant/qdrant:latest
+    container_name: syncflow_qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  # ML Experiment Tracking
+  mlflow:
+    <<: [*service-defaults, *resources-production]
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: syncflow_mlflow
+    command: >
+      mlflow server 
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      --default-artifact-root /mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow/artifacts
+    ports:
+      - "127.0.0.1:5000:5000"
+    depends_on:
+      - postgres
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  postgres_sentry_data:
+  redis_data:
+  rabbitmq_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:
+  sentry_data:
+  sentry_config:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:
+  qdrant_data:
+  mlflow_data:
+
+networks:
+  syncflow_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: "syncflow_net"
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.host_binding_ipv4: ""

@@ -1,0 +1,9 @@
+.env.*
+.env
+.idea/
+
+node_modules/
+public/
+init/
+logs/
+tmp/
