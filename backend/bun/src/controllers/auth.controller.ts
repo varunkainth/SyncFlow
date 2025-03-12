@@ -5,10 +5,17 @@ import { comparePassword, hashPassword } from '../utils/hashPassword.utils';
 import {
   generateAccessToken,
   generateRefreshToken,
+  generatetoken,
   verifyRefreshToken,
+  verifyToken,
 } from '../utils/token.utils';
 import { UserInput } from '../types/user.types';
 import Sentry from '../config/sentry.config';
+import {
+  sendPasswordResetMail,
+  sendWelcomeMail,
+} from '../utils/sendMail.utils';
+import redis from '../config/redis.config';
 
 // Create a single PrismaClient instance and reuse it
 const prisma = new PrismaClient();
@@ -84,6 +91,28 @@ class AuthController {
             },
           },
         });
+        const ip = Array.isArray(req.headers['x-forwarded-for'])
+          ? req.headers['x-forwarded-for'][0]
+          : req.ip || req.headers['x-forwarded-for'] || 'unknown';
+
+        const userAgent = req.headers['user-agent'] || 'unknown';
+
+        // Create session
+        const session = await tx.session.create({
+          data: {
+            userId: newUser.id,
+            ipAddress: ip as string,
+            userAgent: userAgent as string,
+            expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+          },
+        });
+
+        await redis.hset(`session: ${session.id}`, {
+          userId: newUser.id,
+          ipAddress: ip as string,
+          userAgent: userAgent as string,
+          expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+        });
 
         // Create audit log entry
         await tx.auditLog.create({
@@ -91,7 +120,7 @@ class AuthController {
             action: 'USER_REGISTERED',
             details: `New user registered: ${newUser.email}`,
             userId: newUser.id,
-            ipAddress: req.ip || 'unknown',
+            ipAddress: ip as string,
           },
         });
 
@@ -119,6 +148,16 @@ class AuthController {
         sameSite: 'strict',
         maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
       });
+
+      // Send welcome email to new user
+      const verificationToken = await generatetoken(result.email);
+      const verificationLink = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
+
+      await sendWelcomeMail(
+        result.email,
+        `${result.profile?.firstName} ${result.profile?.lastName}`,
+        verificationLink,
+      );
 
       // Return success response with safe user data
       return res.status(201).json({
@@ -229,6 +268,27 @@ class AuthController {
         email: user.email,
       });
       const refreshToken = generateRefreshToken(user.id);
+
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      const ip = Array.isArray(req.headers['x-forwarded-for'])
+        ? req.headers['x-forwarded-for'][0]
+        : req.ip || req.headers['x-forwarded-for'] || 'unknown';
+      // Create session
+      const session = await prisma.session.create({
+        data: {
+          userId: user.id,
+          ipAddress: ip as string,
+          userAgent: userAgent as string,
+          expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+        },
+      });
+
+      await redis.hset(`session: ${session.id}`, {
+        userId: user.id,
+        ipAddress: ip as string,
+        userAgent: userAgent as string,
+        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+      });
 
       // Create audit log entry
       await prisma.auditLog.create({
@@ -375,6 +435,324 @@ class AuthController {
       return res.status(500).json({
         success: false,
         message: 'Token refresh failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  async verifyEmail(req: Request, res: Response) {
+    try {
+      const { token } = req.query;
+
+      if (!token) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid token.',
+        });
+      }
+
+      // Placeholder for email verification method implementation
+      // Will be implemented in a future update
+
+      const verify = await verifyToken(token as string);
+      if (!verify) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired token.',
+        });
+      }
+
+      // Placeholder for email verification method implementation
+      const user = await prisma.user.update({
+        where: { email: verify },
+        data: {
+          isEmailVerified: true,
+        },
+        select: {
+          id: true,
+          email: true,
+          isEmailVerified: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Email verified successfully.',
+        data: user,
+      });
+    } catch (error: any) {
+      console.error('Email verification error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Email verification failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Password Reset
+  async forgetPassword(req: Request, res: Response) {
+    try {
+      const { email } = req.body;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email is required.',
+        });
+      }
+      // Generate a password reset token
+      const token = generatetoken(email);
+
+      // Send password reset email
+      await sendPasswordResetMail(email, token);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Password reset email sent successfully.',
+      });
+    } catch (error: any) {
+      console.error('Password reset error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Password reset failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Password Reset Verify and Reset Password
+
+  async passwordResetVerify(req: Request, res: Response) {
+    try {
+      const password = req.body.password;
+      const token = (req.query.token as string) || req.body.token;
+
+      if (!token || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Token and password are required.',
+        });
+      }
+
+      // Verify token
+      const email = verifyToken(token);
+      if (!email) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired token.',
+        });
+      }
+
+      // Hash new password
+      const hashedPassword = await hashPassword(password);
+
+      // Update user password
+      const user = await prisma.user.update({
+        where: { email },
+        data: {
+          password: hashedPassword,
+        },
+        select: {
+          id: true,
+          email: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Password reset successfully.',
+        data: user,
+      });
+    } catch (error: any) {
+      console.error('Password reset verify error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Password reset verify failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Password Change
+
+  async changePassword(req: Request, res: Response) {
+    try {
+      const { oldPassword, newPassword } = req.body;
+      const email = req.user?.email;
+
+      if (!email || !oldPassword || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Old password, and new password are required.',
+        });
+      }
+
+      // Find user with associated profile
+      const user = await prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          email: true,
+          password: true,
+        },
+      });
+
+      // Check if user exists
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found.',
+        });
+      }
+
+      // Verify old password
+      const passwordMatch = await comparePassword(oldPassword, user.password);
+      if (!passwordMatch) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid old password.',
+        });
+      }
+
+      // Hash new password
+      const hashedPassword = await hashPassword(newPassword);
+
+      // Update user password
+      const updatedUser = await prisma.user.update({
+        where: { email },
+        data: {
+          password: hashedPassword,
+        },
+        select: {
+          id: true,
+          email: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Password changed successfully.',
+        data: updatedUser,
+      });
+    } catch (error: any) {
+      console.error('Change password error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Password change failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Resend EmaIl Verification
+
+  async resendEmailVerification(req: Request, res: Response) {
+    try {
+      const email = req.user?.email;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email is required.',
+        });
+      }
+
+      // Generate a new verification token
+      const token = generatetoken(email);
+
+      // Send verification email
+      await sendWelcomeMail(email, email, token);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Verification email sent successfully.',
+      });
+    } catch (error: any) {
+      console.error('Resend email verification error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Resend email verification failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Get All Sessions
+  async getAllSessions(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Find all sessions for the user
+      const sessions = await prisma.session.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Sessions retrieved successfully.',
+        data: sessions,
+      });
+      
+    } catch (error:any) {
+      console.error('Get all sessions error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Get all sessions failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+      
+    }
+  }
+
+  // Revoke Session
+  async revokeSession(req: Request, res: Response) {
+    try {
+      const sessionId = req.params.id;
+
+      if (!sessionId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Session ID is required.',
+        });
+      }
+
+      // Revoke session
+      await prisma.session.delete({
+        where: { id: sessionId },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Session revoked successfully.',
+      });
+    } catch (error:any) {
+      console.error('Revoke session error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Revoke session failed. Please try again later.',
         error:
           process.env.NODE_ENV === 'development' ? error.message : undefined,
       });

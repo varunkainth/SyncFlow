@@ -11,6 +11,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 app.use(morgon('dev'));
+app.set('trust proxy', true); // Enable proxy trust in Express
+
 
 app.get('/', (req: Request, res: Response) => {
   res.send('Hello World!');
