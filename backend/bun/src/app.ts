@@ -16,4 +16,9 @@ app.get('/', (req: Request, res: Response) => {
   res.send('Hello World!');
 });
 
+// Routes
+import authRoutes from './routes/auth.routes.ts';
+
+app.use('/api/auth', authRoutes);
+
 export default app;

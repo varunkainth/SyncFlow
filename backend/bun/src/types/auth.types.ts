@@ -1,5 +1,5 @@
-import { JwtPayload } from "jsonwebtoken";
-import { Role, Permission } from "../constants/permissions.constants"; // Use Role & Permission from constants
+import { JwtPayload } from 'jsonwebtoken';
+import { Role, Permission } from '../constants/permissions.constants'; // Use Role & Permission from constants
 
 /**
  * TokenPayload: The structure of JWT tokens used for authentication.
@@ -8,7 +8,7 @@ import { Role, Permission } from "../constants/permissions.constants"; // Use Ro
 export interface TokenPayload extends JwtPayload {
   userId: string;
   email: string;
-  roles: Role[]; // Uses Role[] from constants
+  roles?: Role[]; // Uses Role[] from constants
   permissions?: Permission[]; // Uses Permission[] from constants
 }
 
@@ -24,9 +24,28 @@ export interface User {
 
 // Extend Express Request to include `user`
 declare global {
-    namespace Express {
-      interface Request {
-        user?: User;
-      }
+  namespace Express {
+    interface Request {
+      user?: User;
     }
   }
+}
+
+export interface AuthPayload {
+  token: string;
+  refreshToken?: string;
+}
+
+export interface LoginInput {
+  email: string;
+  password: string;
+}
+
+export interface RegisterInput {
+  email: string;
+  password: string;
+  username: string;
+  firstname: string;
+  lastname: string;
+  gender?: string;
+}

@@ -8,25 +8,29 @@ datasource db {
 }
 
 model User {
-  id             String    @id @default(uuid())
-  email          String    @unique
-  password       String
-  name           String?
-  isActive       Boolean   @default(true)
-  roles          UserRole[]
-  profile        Profile?
-  sessions       Session[]
-  auditLogs      AuditLog[]
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id              String    @id @default(uuid())
+  email           String    @unique
+  password        String
+  username        String?
+  isActive        Boolean   @default(true)
+  isEmailVerified Boolean   @default(false)
+  roles           UserRole[]
+  profile         Profile?
+  sessions        Session[]
+  auditLogs       AuditLog[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime? // Soft delete support
 
   // Security Fields
-  failedAttempts Int       @default(0)
-  isLocked       Boolean   @default(false)
-  lastLoginAt    DateTime?
+  failedAttempts  Int       @default(0)
+  isLocked        Boolean   @default(false)
+  lastLoginAt     DateTime?
 
   // 2FA (Enforced for Admins)
   twoFactorSettings TwoFactorSettings?
+
+  @@index([email]) // Faster user lookup
 }
 
 model TwoFactorSettings {
@@ -35,7 +39,7 @@ model TwoFactorSettings {
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   emailEnabled      Boolean  @default(false)  
-  emailCode         String?  // Last sent email OTP (hashed)
+  emailCode         String?  // Hashed OTP  
 
   otpEnabled        Boolean  @default(false)  
   otpSecret         String?  
@@ -43,7 +47,7 @@ model TwoFactorSettings {
   authAppEnabled    Boolean  @default(false)  
   authAppSecret     String?  
 
-  backupCodes       String[] // Backup recovery codes (hashed)
+  backupCodes       String[] // Now properly hashed before storage
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -52,7 +56,7 @@ model Profile {
   id        String  @id @default(uuid())
   userId    String  @unique
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-
+  gender    String? 
   firstName String?
   lastName  String?
   avatarUrl String?
@@ -88,7 +92,8 @@ model UserRole {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, roleId])
+  @@unique([userId, roleId]) // Prevent duplicate roles
+  @@index([userId]) // Faster lookup
 }
 
 model RolePermission {
@@ -99,7 +104,8 @@ model RolePermission {
   role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
-  @@unique([roleId, permissionId])
+  @@unique([roleId, permissionId]) // Prevent duplicate permissions
+  @@index([roleId]) // Faster lookup
 }
 
 model Session {
@@ -107,19 +113,24 @@ model Session {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  ipAddress String?
+  ipAddress String   // Ensure valid IPv4/IPv6 before storing
   userAgent String?
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  @@index([userId]) // Faster session lookups
+
+  // Expire old sessions (handled via cron job or DB trigger)
 }
 
 model AuditLog {
   id        String   @id @default(uuid())
   userId    String?
   user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-
   action    String
   details   String?
-  ipAddress String?
+  ipAddress String   // Ensure proper format for IPv4/IPv6
   createdAt DateTime @default(now())
+
+  @@index([userId]) // Fast retrieval
 }
