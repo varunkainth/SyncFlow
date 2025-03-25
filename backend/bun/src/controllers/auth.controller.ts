@@ -525,9 +525,7 @@ class AuthController {
       });
     }
   }
-
   // Password Reset Verify and Reset Password
-
   async passwordResetVerify(req: Request, res: Response) {
     try {
       const password = req.body.password;
@@ -580,9 +578,7 @@ class AuthController {
       });
     }
   }
-
   // Password Change
-
   async changePassword(req: Request, res: Response) {
     try {
       const { oldPassword, newPassword } = req.body;
@@ -653,9 +649,7 @@ class AuthController {
       });
     }
   }
-
   // Resend EmaIl Verification
-
   async resendEmailVerification(req: Request, res: Response) {
     try {
       const email = req.user?.email;
@@ -688,7 +682,6 @@ class AuthController {
       });
     }
   }
-
   // Get All Sessions
   async getAllSessions(req: Request, res: Response) {
     try {
@@ -725,7 +718,6 @@ class AuthController {
       
     }
   }
-
   // Revoke Session
   async revokeSession(req: Request, res: Response) {
     try {
@@ -758,6 +750,40 @@ class AuthController {
       });
     }
   }
+  // Revoke All Sessions
+  async revokeAllSessions(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Revoke all sessions for the user
+      await prisma.session.deleteMany({
+        where: { userId },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'All sessions revoked successfully.',
+      });
+    } catch (error:any) {
+      console.error('Revoke all sessions error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Revoke all sessions failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+
 }
 
 export default AuthController;
