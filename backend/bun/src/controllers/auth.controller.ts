@@ -13,9 +13,11 @@ import { UserInput } from '../types/user.types';
 import Sentry from '../config/sentry.config';
 import {
   sendPasswordResetMail,
+  sendTwoFactorAuthMail,
   sendWelcomeMail,
 } from '../utils/sendMail.utils';
 import redis from '../config/redis.config';
+import speakeasy from 'speakeasy';
 
 // Create a single PrismaClient instance and reuse it
 const prisma = new PrismaClient();
@@ -30,6 +32,7 @@ class AuthController {
         firstname,
         lastname,
         gender,
+        phone
       }: RegisterInput = req.body;
 
       // Validate input
@@ -39,7 +42,8 @@ class AuthController {
         !username ||
         !firstname ||
         !lastname ||
-        !gender
+        !gender ||
+        !phone
       ) {
         return res.status(400).json({
           success: false,
@@ -48,7 +52,14 @@ class AuthController {
       }
 
       // Check if user already exists
-      const existingUser = await prisma.user.findUnique({ where: { email } });
+      const existingUser = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { email },
+            { phone },
+          ],
+        },
+      });
       if (existingUser) {
         return res.status(409).json({
           success: false,
@@ -67,6 +78,7 @@ class AuthController {
             email,
             password: hashedPassword,
             username: username,
+            phone,
             profile: {
               create: {
                 firstName: firstname,
@@ -79,6 +91,7 @@ class AuthController {
             id: true,
             email: true,
             isEmailVerified: true,
+            phone:true,
             createdAt: true,
             profile: {
               select: {
@@ -96,6 +109,8 @@ class AuthController {
           : req.ip || req.headers['x-forwarded-for'] || 'unknown';
 
         const userAgent = req.headers['user-agent'] || 'unknown';
+
+        const 
 
         // Create session
         const session = await tx.session.create({
@@ -705,8 +720,7 @@ class AuthController {
         message: 'Sessions retrieved successfully.',
         data: sessions,
       });
-      
-    } catch (error:any) {
+    } catch (error: any) {
       console.error('Get all sessions error:', error);
       Sentry.captureException(error);
       return res.status(500).json({
@@ -715,7 +729,6 @@ class AuthController {
         error:
           process.env.NODE_ENV === 'development' ? error.message : undefined,
       });
-      
     }
   }
   // Revoke Session
@@ -739,7 +752,7 @@ class AuthController {
         success: true,
         message: 'Session revoked successfully.',
       });
-    } catch (error:any) {
+    } catch (error: any) {
       console.error('Revoke session error:', error);
       Sentry.captureException(error);
       return res.status(500).json({
@@ -771,19 +784,366 @@ class AuthController {
         success: true,
         message: 'All sessions revoked successfully.',
       });
-    } catch (error:any) {
+    } catch (error: any) {
       console.error('Revoke all sessions error:', error);
       Sentry.captureException(error);
       return res.status(500).json({
         success: false,
         message: 'Revoke all sessions failed. Please try again later.',
         error:
-          process.env.NODE_ENV === 'development' ? error.message : undefined
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
       });
     }
   }
 
+  // setTwoFactor
 
+  async setTwoFactor(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Generate a new two-factor authentication secret
+      const secret = speakeasy.generateSecret({
+        length: 20,
+        name: 'SyncFlow',
+      });
+
+      // Save the secret to the user's profile
+      // Upsert TwoFactorSettings (create if not exists, update if exists)
+      const twoFactorSettings = await prisma.twoFactorSettings.upsert({
+        where: { userId },
+        update: {
+          authAppEnabled: true,
+          authAppSecret: secret.base32,
+          authAppSecretUrl: secret.otpauth_url,
+        },
+        create: {
+          userId,
+          authAppEnabled: true,
+          authAppSecret: secret.base32,
+          authAppSecretUrl: secret.otpauth_url,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Two-factor authentication setup successfully.',
+        authAppSecretUrl: twoFactorSettings.authAppSecretUrl,
+        authAppSecret: twoFactorSettings.authAppSecret,
+      });
+    } catch (error: any) {
+      console.error('Set two-factor error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message:
+          'Set two-factor authentication failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Verify Two Factor
+  async verifyTwoFactor(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+      const { token } = req.body;
+
+      if (!userId || !token) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID and token are required.',
+        });
+      }
+
+      // Find the user's two-factor settings
+      const twoFactorSettings = await prisma.twoFactorSettings.findUnique({
+        where: { userId },
+      });
+
+      if (!twoFactorSettings) {
+        return res.status(404).json({
+          success: false,
+          message: 'Two-factor authentication not set up.',
+        });
+      }
+
+      // Verify the token
+      const verified = speakeasy.totp.verify({
+        secret: twoFactorSettings.authAppSecret || '',
+        encoding: 'base32',
+        token,
+      });
+
+      if (!verified) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token.',
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Two-factor authentication verified successfully.',
+      });
+    } catch (error: any) {
+      console.error('Verify two-factor error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message:
+          'Verify two-factor authentication failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+  // Disable Two Factor
+  async disableTwoFactor(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Disable two-factor authentication
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          authAppEnabled: false,
+          authAppSecret: '',
+          authAppSecretUrl: '',
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Two-factor authentication disabled successfully.',
+      });
+    } catch (error: any) {
+      console.error('Disable two-factor error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message:
+          'Disable two-factor authentication failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+
+  // Enable Email Otp TwoStep
+  async enableEmailOtp(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Enable email OTP
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          emailEnabled: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Email OTP enabled successfully.',
+      });
+    } catch (error: any) {
+      console.error('Enable email OTP error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Enable email OTP failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+  // Disable Email Otp TwoStep
+  async disableEmailOtp(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Disable email OTP
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          emailEnabled: false,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Email OTP disabled successfully.',
+      });
+    } catch (error: any) {
+      console.error('Disable email OTP error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Disable email OTP failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+  // Enable Phone Otp TwoStep
+  async enablePhoneOtp(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Enable phone OTP
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          otpEnabled: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Phone OTP enabled successfully.',
+      });
+    } catch (error: any) {
+      console.error('Enable phone OTP error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Enable phone OTP failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+  // Disable Phone Otp TwoStep
+  async disablePhoneOtp(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Disable phone OTP
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          otpEnabled: false,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Phone OTP disabled successfully.',
+      });
+    } catch (error: any) {
+      console.error('Disable phone OTP error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Disable phone OTP failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+  // Send Email Otp
+  async sendEmailOtp(req: Request, res: Response) {
+    try {
+      const userId = req.user?.userId;
+      const email = req.user?.email;
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email is required.',
+        });
+      }
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required.',
+        });
+      }
+
+      // Generate a new email OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      // Send email OTP
+      await sendTwoFactorAuthMail(email, otp);
+      // Store OTP in Redis with a 5-minute expiration
+      await redis.set(`emailOtp:${userId}`, otp, 'EX', 300); // 5 minutes
+      // Store OTP in database
+      await prisma.twoFactorSettings.update({
+        where: { userId },
+        data: {
+          emailCode: otp,
+        },
+      });
+      // Create audit log entry
+      await prisma.auditLog.create({
+        data: {
+          action: 'EMAIL_OTP_SENT',
+          details: `Email OTP sent to user: ${email}`,
+          userId,
+          ipAddress: req.ip || 'unknown',
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Email OTP sent successfully.',
+        otp,
+      });
+    } catch (error: any) {
+      console.error('Send email OTP error:', error);
+      Sentry.captureException(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Send email OTP failed. Please try again later.',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
 }
 
 export default AuthController;

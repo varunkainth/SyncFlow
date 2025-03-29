@@ -48,4 +48,5 @@ export interface RegisterInput {
   firstname: string;
   lastname: string;
   gender?: string;
+  phone?: string;
 }

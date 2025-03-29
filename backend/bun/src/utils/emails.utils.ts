@@ -623,3 +623,106 @@ export const getAccountDeactivationEmailHtml = ({
       </html>
     `;
   };
+
+  export const getSyncFlowTwoFactorEmailHtml = ({
+    email,
+    otpCode,
+  }: { email: string; otpCode: string }): string => {
+    return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>SyncFlow Two-Factor Authentication</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+          }
+          .container {
+            max-width: 600px;
+            margin: 20px auto;
+            background: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+          }
+          .header {
+            text-align: center;
+          }
+          .header .logo {
+            font-size: 32px;
+            font-weight: 700;
+            color: #007BFF;
+          }
+          .content {
+            padding: 20px;
+            text-align: center;
+          }
+          .otp {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007BFF;
+            padding: 10px 20px;
+            background: #e7f3ff;
+            display: inline-block;
+            border-radius: 5px;
+            letter-spacing: 2px;
+          }
+          .expiry {
+            font-size: 14px;
+            color: #555;
+          }
+          .security-note {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f8f8;
+            border-left: 4px solid #007BFF;
+          }
+          .footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #777;
+          }
+          .social-links a {
+            color: #007BFF;
+            text-decoration: none;
+            margin: 0 5px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="logo">SyncFlow</div>
+            <h1>Two-Factor Authentication</h1>
+          </div>
+          <div class="content">
+            <p>Dear <strong>${email}</strong>,</p>
+            <p>Use the following OTP to complete your login:</p>
+            <div class="otp">${otpCode}</div>
+            <p class="expiry">This OTP will expire in 5 minutes.</p>
+            <div class="security-note">
+              <h4>Security Notice</h4>
+              <p>If you didn't request this verification code, please ignore this email or contact support immediately.</p>
+            </div>
+          </div>
+          <div class="footer">
+            <p>© 2025 SyncFlow. All rights reserved.</p>
+            <div class="social-links">
+              <a href="#">Twitter</a> | 
+              <a href="#">LinkedIn</a> | 
+              <a href="#">Instagram</a>
+            </div>
+            <p>This is an automated message. Please do not reply.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  };
+  

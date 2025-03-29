@@ -6,6 +6,7 @@ import {
   getTaskAssignmentEmailHtml,
   getWeeklyDigestEmailHtml,
   getAccountDeactivationEmailHtml,
+  getSyncFlowTwoFactorEmailHtml,
 } from './emails.utils.ts';
 
 /**
@@ -59,7 +60,12 @@ export const sendProjectInvitationMail = async (
       from: process.env.EMAIL_USER,
       to: recipientEmail,
       subject: 'You’ve Been Invited to a Project on SyncFlow',
-      html: getSyncFlowEmailHtml({ recipientName, invitedBy, acceptLink, rejectLink }),
+      html: getSyncFlowEmailHtml({
+        recipientName,
+        invitedBy,
+        acceptLink,
+        rejectLink,
+      }),
     });
   } catch (error) {
     console.error('[SendMailError]', error);
@@ -135,7 +141,28 @@ export const sendAccountDeactivationMail = async (
       from: process.env.EMAIL_USER,
       to: email,
       subject: 'Account Deactivation Notice',
-      html: getAccountDeactivationEmailHtml({ userName, deactivationDate, reactivationLink }),
+      html: getAccountDeactivationEmailHtml({
+        userName,
+        deactivationDate,
+        reactivationLink,
+      }),
+    });
+  } catch (error) {
+    console.error('[SendMailError]', error);
+  }
+};
+
+/**
+ * Send Email for Two Factor Authentication
+ */
+
+export const sendTwoFactorAuthMail = async (email: string, otp: string) => {
+  try {
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Two Factor Authentication Code',
+      html: getSyncFlowTwoFactorEmailHtml({ email, otpCode: otp }),
     });
   } catch (error) {
     console.error('[SendMailError]', error);
